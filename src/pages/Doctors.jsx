@@ -1,7 +1,7 @@
 import { useEffect, useState, useCallback } from 'react'
 import { supabase } from '../lib/supabase'
 import { toast } from 'react-hot-toast'
-import { Pencil, Trash2, Plus, ExternalLink } from 'lucide-react'
+import { Pencil, Trash2, Plus, ExternalLink, Upload, Image } from 'lucide-react'
 import DataTable, { PAGE_SIZE } from '../components/DataTable'
 import Modal from '../components/Modal'
 import ConfirmDialog from '../components/ConfirmDialog'
@@ -27,6 +27,8 @@ export default function Doctors() {
   const [modalOpen, setModalOpen] = useState(false)
   const [editRow, setEditRow] = useState(null)
   const [form, setForm] = useState(EMPTY_FORM)
+  const [imageFile, setImageFile] = useState(null)
+  const [imageUploading, setImageUploading] = useState(false)
   const [saving, setSaving] = useState(false)
 
   const [deleteRow, setDeleteRow] = useState(null)
@@ -56,6 +58,7 @@ export default function Doctors() {
   function openCreate() {
     setEditRow(null)
     setForm(EMPTY_FORM)
+    setImageFile(null)
     setModalOpen(true)
   }
 
@@ -69,30 +72,88 @@ export default function Doctors() {
       specialization_ar: row.specialization_ar ?? '',
       image_asset: row.image_asset ?? '',
     })
+    setImageFile(null)
     setModalOpen(true)
+  }
+
+  async function uploadImage(file) {
+    const fileExt = file.name.split('.').pop()
+    const fileName = `${Date.now()}-${Math.random().toString(36).substring(2)}.${fileExt}`
+    const filePath = `doctors/${fileName}`
+
+    const { error: uploadError } = await supabase.storage
+      .from('medi_five')
+      .upload(filePath, file)
+
+    if (uploadError) throw uploadError
+
+    const { data: { publicUrl } } = supabase.storage
+      .from('medi_five')
+      .getPublicUrl(filePath)
+
+    return publicUrl
+  }
+
+  async function deleteImageFromStorage(url) {
+    if (!url || !url.includes('/storage/v1/object/public/medi_five/')) return
+    const path = url.split('/medi_five/').pop()
+    if (path) {
+      await supabase.storage.from('medi_five').remove([path])
+    }
+  }
+
+  async function handleImageUpload(file) {
+    if (!file) return
+    setImageUploading(true)
+    try {
+      const url = await uploadImage(file)
+      setForm(f => ({ ...f, image_asset: url }))
+      setImageFile(file)
+      toast.success('Image uploaded!')
+    } catch (err) {
+      toast.error('Image upload failed: ' + err.message)
+    } finally {
+      setImageUploading(false)
+    }
   }
 
   async function handleSave() {
     setSaving(true)
-    const payload = {
-      name_en: form.name_en || null,
-      name_ar: form.name_ar || null,
-      social_url: form.social_url || null,
-      specialization_en: form.specialization_en || null,
-      specialization_ar: form.specialization_ar || null,
-      image_asset: form.image_asset || null,
+    try {
+      let finalImageUrl = form.image_asset
+
+      if (imageFile && !form.image_asset.includes('/storage/v1/')) {
+        // Already uploaded via handleImageUpload, URL is set
+      }
+
+      // If editing and the image changed (new upload replaced old), delete the old one
+      if (editRow?.image_asset && imageFile && editRow.image_asset !== finalImageUrl) {
+        await deleteImageFromStorage(editRow.image_asset)
+      }
+
+      const payload = {
+        name_en: form.name_en || null,
+        name_ar: form.name_ar || null,
+        social_url: form.social_url || null,
+        specialization_en: form.specialization_en || null,
+        specialization_ar: form.specialization_ar || null,
+        image_asset: finalImageUrl || null,
+      }
+      let error
+      if (editRow) {
+        ;({ error } = await supabase.from('med_five_doctors').update(payload).eq('id', editRow.id))
+      } else {
+        ;({ error } = await supabase.from('med_five_doctors').insert(payload))
+      }
+      if (error) throw error
+      toast.success(editRow ? 'Doctor updated!' : 'Doctor created!')
+      setModalOpen(false)
+      fetchData()
+    } catch (err) {
+      toast.error(err.message)
+    } finally {
+      setSaving(false)
     }
-    let error
-    if (editRow) {
-      ;({ error } = await supabase.from('med_five_doctors').update(payload).eq('id', editRow.id))
-    } else {
-      ;({ error } = await supabase.from('med_five_doctors').insert(payload))
-    }
-    setSaving(false)
-    if (error) { toast.error(error.message); return }
-    toast.success(editRow ? 'Doctor updated!' : 'Doctor created!')
-    setModalOpen(false)
-    fetchData()
   }
 
   async function handleDelete() {
@@ -229,8 +290,37 @@ export default function Doctors() {
             <input className="form-input" value={form.social_url} onChange={e => setForm(f => ({ ...f, social_url: e.target.value }))} placeholder="https://..." type="url" />
           </div>
           <div className="form-group form-grid-full">
-            <label className="form-label">Image Asset URL</label>
-            <input className="form-input" value={form.image_asset} onChange={e => setForm(f => ({ ...f, image_asset: e.target.value }))} placeholder="https://..." type="url" />
+            <label className="form-label">Image Asset</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <label
+                htmlFor="doctor-image-upload"
+                className="btn btn-secondary"
+                style={{ cursor: imageUploading ? 'not-allowed' : 'pointer', display: 'inline-flex', alignItems: 'center', gap: 8, userSelect: 'none' }}
+              >
+                {imageUploading
+                  ? <span className="loading-spinner" />
+                  : <Upload size={15} />}
+                {imageUploading ? 'Uploading…' : 'Upload Image'}
+              </label>
+              <input
+                id="doctor-image-upload"
+                type="file"
+                accept="image/*"
+                style={{ display: 'none' }}
+                disabled={imageUploading}
+                onChange={e => handleImageUpload(e.target.files[0])}
+              />
+              {imageFile && !imageUploading && (
+                <span style={{ fontSize: 12, color: 'var(--accent-success)' }}>✓ {imageFile.name}</span>
+              )}
+              {!imageFile && form.image_asset && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <Image size={13} style={{ color: 'var(--text-muted)' }} />
+                  <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>Existing image</span>
+                  <a href={form.image_asset} target="_blank" rel="noreferrer" style={{ fontSize: 12, color: 'var(--accent-primary)' }}>Preview</a>
+                </div>
+              )}
+            </div>
           </div>
         </div>
       </Modal>
